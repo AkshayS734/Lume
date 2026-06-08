@@ -2,100 +2,133 @@
 //  PreferencesManager.swift
 //  Lume
 //
-//  Observable preferences model backed by UserDefaults via @AppStorage.
-//  All UI and window layers observe this for live updates.
+//  Observable preferences model backed by UserDefaults.
+//  Migrated from ObservableObject/@AppStorage to @Observable (macOS 14 Sonoma).
+//  @Observable provides granular, property-level observation — only views that
+//  read a specific property re-render when it changes. No unnecessary refreshes.
 //
 
 import SwiftUI
 import Combine
 import ServiceManagement
+import Observation
 
+// MARK: - PreferencesManager
+
+@Observable
 @MainActor
-final class PreferencesManager: ObservableObject {
-    
+final class PreferencesManager {
+
     static let shared = PreferencesManager()
-    
+
     // MARK: - Display
-    
-    @AppStorage(AppConstants.Keys.use24HourFormat)
-    var use24HourFormat: Bool = AppConstants.Defaults.use24HourFormat {
-        willSet { objectWillChange.send() }
+
+    var use24HourFormat: Bool = true {
+        didSet { UserDefaults.standard.set(use24HourFormat, forKey: Keys.use24HourFormat) }
     }
-    
-    @AppStorage(AppConstants.Keys.showDate)
-    var showDate: Bool = AppConstants.Defaults.showDate {
-        willSet { objectWillChange.send() }
+
+    var showDate: Bool = true {
+        didSet { UserDefaults.standard.set(showDate, forKey: Keys.showDate) }
     }
-    
+
     // MARK: - Appearance
-    
-    @AppStorage(AppConstants.Keys.clockOpacity)
-    var clockOpacity: Double = AppConstants.Defaults.clockOpacity {
-        willSet { objectWillChange.send() }
+
+    var clockOpacity: Double = 0.80 {
+        didSet { UserDefaults.standard.set(clockOpacity, forKey: Keys.clockOpacity) }
     }
-    
-    @AppStorage(AppConstants.Keys.fontSize)
-    var fontSize: Double = AppConstants.Defaults.fontSize {
-        willSet { objectWillChange.send() }
+
+    var fontSize: Double = 72.0 {
+        didSet { UserDefaults.standard.set(fontSize, forKey: Keys.fontSize) }
     }
-    
-    // MARK: - Position (persisted per-screen center-relative offset)
-    
-    @Published var positions: [String: CGPoint] = [:] {
+
+    // MARK: - Position (per-screen, persisted)
+
+    var positions: [String: CGPoint] = [:] {
+        didSet { savePositions() }
+    }
+
+    // MARK: - Behavior
+
+    var isVisible: Bool = true {
+        didSet { UserDefaults.standard.set(isVisible, forKey: Keys.isVisible) }
+    }
+
+    /// Transient flag — not persisted. True while the user is dragging the clock.
+    var isRepositioning: Bool = false
+
+    var launchAtLogin: Bool = false {
         didSet {
-            var dict: [String: [Double]] = [:]
-            for (key, val) in positions {
-                dict[key] = [Double(val.x), Double(val.y)]
-            }
-            UserDefaults.standard.set(dict, forKey: AppConstants.Keys.savedPositions)
+            UserDefaults.standard.set(launchAtLogin, forKey: Keys.launchAtLogin)
+            updateLaunchAtLogin()
         }
     }
-    
-    // MARK: - Behavior
-    
-    @AppStorage(AppConstants.Keys.isVisible)
-    var isVisible: Bool = AppConstants.Defaults.isVisible {
-        willSet { objectWillChange.send() }
-    }
-    
-    /// Transient flag — not persisted. True while the user is dragging the clock.
-    @Published var isRepositioning: Bool = false
-    
-    @AppStorage(AppConstants.Keys.launchAtLogin)
-    var launchAtLogin: Bool = AppConstants.Defaults.launchAtLogin {
-        didSet { updateLaunchAtLogin() }
-    }
-    
+
     // MARK: - Helpers
-    
-    /// Toggles clock visibility with a smooth fade.
+
     func toggleVisibility() {
         isVisible.toggle()
     }
-    
-    /// Registers baseline defaults to avoid AppStorage racing.
-    func registerDefaults() {
-        let defaults: [String: Any] = [
-            AppConstants.Keys.use24HourFormat: AppConstants.Defaults.use24HourFormat,
-            AppConstants.Keys.showDate: AppConstants.Defaults.showDate,
-            AppConstants.Keys.clockOpacity: AppConstants.Defaults.clockOpacity,
-            AppConstants.Keys.fontSize: AppConstants.Defaults.fontSize,
-            AppConstants.Keys.isVisible: AppConstants.Defaults.isVisible,
-            AppConstants.Keys.launchAtLogin: AppConstants.Defaults.launchAtLogin
-        ]
-        UserDefaults.standard.register(defaults: defaults)
-    }
-    
-    /// Resets clock position to the center of all screens.
+
     func resetPosition() {
         for screen in NSScreen.screens {
-            guard let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { continue }
-            let screenID = String(screenNumber)
-            positions[screenID] = CGPoint(x: screen.frame.width / 2, y: screen.frame.height / 2)
+            guard let screenNumber = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { continue }
+            positions[String(screenNumber)] = CGPoint(
+                x: screen.frame.width / 2,
+                y: screen.frame.height / 2
+            )
         }
     }
-    
-    /// Registers / unregisters the app from Login Items via SMAppService.
+
+    // MARK: - Init
+
+    private init() {
+        registerDefaults()
+        loadAll()
+    }
+
+    // MARK: - Persistence
+
+    func registerDefaults() {
+        UserDefaults.standard.register(defaults: [
+            Keys.use24HourFormat: true,
+            Keys.showDate: true,
+            Keys.clockOpacity: 0.80,
+            Keys.fontSize: 72.0,
+            Keys.isVisible: true,
+            Keys.launchAtLogin: false,
+        ])
+    }
+
+    private func loadAll() {
+        let ud = UserDefaults.standard
+        use24HourFormat = ud.bool(forKey: Keys.use24HourFormat)
+        showDate        = ud.bool(forKey: Keys.showDate)
+        clockOpacity    = ud.double(forKey: Keys.clockOpacity)
+        fontSize        = ud.double(forKey: Keys.fontSize)
+        isVisible       = ud.bool(forKey: Keys.isVisible)
+        launchAtLogin   = ud.bool(forKey: Keys.launchAtLogin)
+        loadPositions()
+    }
+
+    private func loadPositions() {
+        guard let dict = UserDefaults.standard.dictionary(forKey: Keys.savedPositions)
+                as? [String: [Double]] else { return }
+        var loaded: [String: CGPoint] = [:]
+        for (key, val) in dict where val.count == 2 {
+            loaded[key] = CGPoint(x: val[0], y: val[1])
+        }
+        positions = loaded
+    }
+
+    private func savePositions() {
+        var dict: [String: [Double]] = [:]
+        for (key, pt) in positions {
+            dict[key] = [Double(pt.x), Double(pt.y)]
+        }
+        UserDefaults.standard.set(dict, forKey: Keys.savedPositions)
+    }
+
     private func updateLaunchAtLogin() {
         do {
             if launchAtLogin {
@@ -104,19 +137,19 @@ final class PreferencesManager: ObservableObject {
                 try SMAppService.mainApp.unregister()
             }
         } catch {
-            print("Launch at login error: \(error.localizedDescription)")
+            print("[Lume] Launch at login error: \(error.localizedDescription)")
         }
     }
-    
-    private init() {
-        if let dict = UserDefaults.standard.dictionary(forKey: AppConstants.Keys.savedPositions) as? [String: [Double]] {
-            var loaded: [String: CGPoint] = [:]
-            for (key, val) in dict {
-                if val.count == 2 {
-                    loaded[key] = CGPoint(x: val[0], y: val[1])
-                }
-            }
-            positions = loaded
-        }
+
+    // MARK: - Keys
+
+    private enum Keys {
+        static let use24HourFormat = "use24HourFormat"
+        static let clockOpacity    = "clockOpacity"
+        static let fontSize        = "fontSize"
+        static let showDate        = "showDate"
+        static let savedPositions  = "savedPositions"
+        static let isVisible       = "isVisible"
+        static let launchAtLogin   = "launchAtLogin"
     }
 }

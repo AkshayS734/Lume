@@ -9,7 +9,7 @@
 
 import AppKit
 import SwiftUI
-import Combine
+import Observation
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -22,7 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let viewModel = ClockViewModel()
     
     /// Whether repositioning mode is active (mouse events temporarily enabled).
-    /// Setting this updates both the preferences flag and the windows' mouse-event mode.
     var isRepositioning: Bool {
         get { preferences.isRepositioning }
         set {
@@ -33,8 +32,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     
     /// Global keyboard shortcut monitor (⌘⇧W to toggle visibility).
     private var keyMonitor: Any?
-    /// Combine subscriptions.
-    private var cancellables = Set<AnyCancellable>()
+    /// Observation task for isRepositioning changes.
+    private var observationTask: Task<Void, Never>?
     
     // MARK: - Lifecycle
     
@@ -43,13 +42,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         createClockWindows()
         registerKeyboardShortcut()
         
-        // Watch preferences.isRepositioning so that when DragOverlayView
-        // sets it to false directly, we still update ignoresMouseEvents on all windows.
-        preferences.$isRepositioning
-            .dropFirst()                 // skip the initial value
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateMouseEventHandling() }
-            .store(in: &cancellables)
+        // Watch preferences.isRepositioning using @Observable's tracking API.
+        // When DragOverlayView sets it to false, we update mouse events on all windows.
+        observationTask = Task {
+            while !Task.isCancelled {
+                // withObservationTracking fires the apply closure once, then calls
+                // the onChange closure exactly once when a tracked property changes.
+                await withCheckedContinuation { continuation in
+                    withObservationTracking {
+                        _ = self.preferences.isRepositioning   // register dependency
+                    } onChange: {
+                        continuation.resume()
+                    }
+                }
+                await MainActor.run { self.updateMouseEventHandling() }
+            }
+        }
         
         // Observe display configuration changes (resolution, displays added/removed)
         NotificationCenter.default.addObserver(
@@ -61,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        observationTask?.cancel()
         if let monitor = keyMonitor {
             NSEvent.removeMonitor(monitor)
         }

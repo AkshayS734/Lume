@@ -2,51 +2,68 @@
 //  Lume.swift
 //  Lume
 //
-//  App entry point.
-//  - Bridges to AppDelegate for NSWindow management
-//  - Declares a MenuBarExtra (the primary UI for control)
-//  - Declares a Settings scene for the preferences window
-//
-//  This is an "agent" app (LSUIElement = true): no Dock icon,
-//  interaction is via the menu bar clock icon.
+//  App entry point — bridges to AppDelegate for NSWindow management,
+//  declares the MenuBarExtra and Settings scene.
+//  Singletons (ThemeEngine, PreferencesManager) are accessed directly
+//  since @Observable doesn't need environment injection for non-view access.
 //
 
 import SwiftUI
 
 @main
 struct LumeApp: App {
-    
-    // Bridge to AppKit for window management
+
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
-    @ObservedObject private var preferences = PreferencesManager.shared
-    
+
     var body: some Scene {
-        
+
         // MARK: - Menu Bar
         MenuBarExtra {
             MenuBarContentView(appDelegate: appDelegate)
         } label: {
-            Image(systemName: "clock")
+            MenuBarLabel()
         }
-        
+
         // MARK: - Settings Window
         Settings {
-            SettingsView(preferences: preferences)
+            SettingsView()
         }
+    }
+}
+
+// MARK: - Menu Bar Label
+
+/// Dynamic label showing a live clock icon.
+struct MenuBarLabel: View {
+    var body: some View {
+        Image(systemName: "clock")
     }
 }
 
 // MARK: - Menu Bar Content
 
-/// The dropdown menu shown when the user clicks the menu bar icon.
 struct MenuBarContentView: View {
-    
+
     let appDelegate: AppDelegate
-    @ObservedObject private var preferences = PreferencesManager.shared
-    
+
+    @State private var preferences = PreferencesManager.shared
+    @State private var engine = ThemeEngine.shared
+
     var body: some View {
         Group {
+
+            // Current time readout
+            HStack {
+                Image(systemName: "clock.fill")
+                    .foregroundStyle(.secondary)
+                Text(currentTimeString)
+                    .font(.system(.body, design: .monospaced))
+                    .monospacedDigit()
+            }
+            .padding(.vertical, 4)
+
+            Divider()
+
             // Visibility toggle
             Button {
                 withAnimation(.easeInOut(duration: 0.4)) {
@@ -59,49 +76,59 @@ struct MenuBarContentView: View {
                 )
             }
             .keyboardShortcut("w", modifiers: [.command, .shift])
-            
-            Divider()
-            
+
             // Reposition mode
-            Button {
-                appDelegate.toggleRepositioning()
-            } label: {
+            Button { appDelegate.toggleRepositioning() } label: {
                 Label(
                     appDelegate.isRepositioning ? "Done Repositioning" : "Reposition Clock",
                     systemImage: "arrow.up.and.down.and.arrow.left.and.right"
                 )
             }
             .keyboardShortcut("r", modifiers: [.command])
-            
-            // Reset position
-            Button {
-                preferences.resetPosition()
-            } label: {
+
+            Button { preferences.resetPosition() } label: {
                 Label("Reset Position", systemImage: "arrow.counterclockwise")
             }
-            
+
             Divider()
-            
+
             // Quick toggles
             Toggle(isOn: $preferences.use24HourFormat) {
                 Label("24-Hour Format", systemImage: "clock.badge.checkmark")
             }
-            
             Toggle(isOn: $preferences.showDate) {
                 Label("Show Date", systemImage: "calendar")
             }
-            
+
             Divider()
-            
-            // Settings
+
+            // Active theme indicator
+            Menu {
+                ForEach(ClockThemeID.allCases) { id in
+                    Button {
+                        engine.selectTheme(id)
+                    } label: {
+                        HStack {
+                            Text(id.displayName)
+                            if engine.activeThemeID == id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label("Theme: \(engine.activeThemeID.displayName)", systemImage: "paintbrush")
+            }
+
+            Divider()
+
             SettingsLink {
                 Label("Settings…", systemImage: "gear")
             }
             .keyboardShortcut(",", modifiers: [.command])
-            
+
             Divider()
-            
-            // Quit
+
             Button {
                 NSApplication.shared.terminate(nil)
             } label: {
@@ -109,5 +136,11 @@ struct MenuBarContentView: View {
             }
             .keyboardShortcut("q", modifiers: [.command])
         }
+    }
+
+    private var currentTimeString: String {
+        let f = DateFormatter()
+        f.dateFormat = preferences.use24HourFormat ? "HH:mm:ss" : "h:mm:ss a"
+        return f.string(from: Date())
     }
 }
